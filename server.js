@@ -1,9 +1,7 @@
 const express = require('express');
 const app = express();
 
-// ============================================
 // CORS
-// ============================================
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
@@ -18,10 +16,7 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// ============================================
-// KONFIGURACJA
-// ============================================
-
+// KONFIGURACJA - ZMIENNE ŚRODOWISKOWE
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
@@ -35,17 +30,11 @@ if (!DISCORD_CHANNEL_ID) {
     process.exit(1);
 }
 
-// ============================================
-// PRZECHOWYWANIE AKTYWNEJ WIADOMOŚCI
-// ============================================
-
+// ZMIENNE GLOBALNE - przechowują ID aktywnej wiadomości
 let activeMessageId = null;
 let activeCodeType = null;
 
-// ============================================
 // ROUTES
-// ============================================
-
 app.get('/', (req, res) => {
     res.json({ 
         status: 'OK', 
@@ -54,7 +43,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// Główny endpoint - wysyła NOWĄ lub EDYTUJE istniejącą
+// GŁÓWNY ENDPOINT - wysyła NOWĄ lub EDYTUJE istniejącą
 app.post('/send-threat', async (req, res) => {
     console.log('[POST] Otrzymano:', req.body);
     
@@ -97,7 +86,6 @@ app.post('/send-threat', async (req, res) => {
     }
     
     try {
-        // Przygotuj embed
         const embed = {
             title: `${code.emoji} ${code.name}`,
             description: code.desc,
@@ -139,9 +127,9 @@ app.post('/send-threat', async (req, res) => {
         let response;
         let isEdit = false;
         
-        // Jeśli mamy aktywną wiadomość - EDYTUJEMY ją
+        // Jeśli mamy aktywną wiadomość - EDYTUJEMY ją (PATCH)
         if (activeMessageId) {
-            console.log('[POST] Edytuję istniejącą wiadomość:', activeMessageId);
+            console.log('[POST] Edytuję istniejącą:', activeMessageId);
             
             const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${activeMessageId}`;
             
@@ -157,7 +145,7 @@ app.post('/send-threat', async (req, res) => {
             isEdit = true;
             
         } else {
-            // Brak aktywnej - WYSYŁAMY nową
+            // Brak aktywnej - WYSYŁAMY nową (POST)
             console.log('[POST] Wysyłam nową wiadomość');
             
             const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`;
@@ -174,11 +162,11 @@ app.post('/send-threat', async (req, res) => {
         
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('[POST] Błąd Discord:', response.status, errorText);
+            console.error('[POST] Błąd:', response.status, errorText);
             
-            // Jeśli edycja się nie udała (np. wiadomość została usunięta), wyślij nową
+            // Jeśli edycja nieudana (404), wyślij nową
             if (isEdit && response.status === 404) {
-                console.log('[POST] Edycja nieudana, wysyłam nową...');
+                console.log('[POST] Edycja nieudana, nowa...');
                 activeMessageId = null;
                 
                 const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`;
@@ -192,28 +180,26 @@ app.post('/send-threat', async (req, res) => {
                     body: JSON.stringify({ embeds: [embed] })
                 });
                 
+                isEdit = false;
+                
                 if (!response.ok) {
-                    const errorText2 = await response.text();
-                    return res.status(response.status).json({ 
-                        success: false, 
-                        error: 'Discord API: ' + errorText2 
-                    });
+                    const err = await response.text();
+                    return res.status(500).json({ success: false, error: err });
                 }
             } else {
                 return res.status(response.status).json({ 
                     success: false, 
-                    error: 'Discord API: ' + errorText 
+                    error: errorText 
                 });
             }
         }
         
         const data = await response.json();
         
-        // Zapisz ID wiadomości i typ kodu
         activeMessageId = data.id;
         activeCodeType = codeType;
         
-        console.log('[POST] Sukces! ID:', data.id, 'Typ:', codeType, 'Edycja:', isEdit);
+        console.log('[POST] Sukces! ID:', data.id, 'Edycja:', isEdit);
         
         res.json({ 
             success: true,
@@ -233,13 +219,8 @@ app.post('/send-threat', async (req, res) => {
 
 // Usuń aktywną wiadomość (reset)
 app.delete('/delete-active', async (req, res) => {
-    console.log('[DELETE] Usuwanie aktywnej wiadomości:', activeMessageId);
-    
     if (!activeMessageId) {
-        return res.json({ 
-            success: true, 
-            message: 'Brak aktywnej wiadomości' 
-        });
+        return res.json({ success: true, message: 'Brak aktywnej' });
     }
     
     try {
@@ -253,49 +234,17 @@ app.delete('/delete-active', async (req, res) => {
             }
         });
         
-        console.log('[DELETE] Status:', response.status);
-        
-        // Wyczyść zmienną niezależnie od wyniku
         activeMessageId = null;
         activeCodeType = null;
         
-        if (response.status === 204 || response.status === 404) {
-            return res.json({ 
-                success: true, 
-                message: 'Usunięto lub nie istniała'
-            });
-        }
-        
-        const errorText = await response.text();
-        res.status(response.status).json({ 
-            success: false, 
-            error: errorText 
-        });
+        res.json({ success: true, status: response.status });
         
     } catch (e) {
-        console.error('[DELETE] Wyjątek:', e);
-        activeMessageId = null;
-        activeCodeType = null;
-        res.status(500).json({ 
-            success: false, 
-            error: e.message 
-        });
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// Sprawdź status
-app.get('/status', (req, res) => {
-    res.json({
-        activeMessageId: activeMessageId,
-        activeCodeType: activeCodeType,
-        hasActiveMessage: !!activeMessageId
-    });
-});
-
-// ============================================
 // START
-// ============================================
-
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
@@ -304,6 +253,5 @@ app.listen(PORT, () => {
     console.log('📺 Kanał Discord ID:', DISCORD_CHANNEL_ID);
     console.log('🔑 Token ustawiony:', DISCORD_BOT_TOKEN ? 'TAK' : 'NIE');
     console.log('🌐 CORS: WŁĄCZONY');
-    console.log('📝 Tryb: EDYCJA wiadomości (jedna wiadomość)');
     console.log('========================================');
 });
