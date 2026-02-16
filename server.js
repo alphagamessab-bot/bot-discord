@@ -16,74 +16,99 @@ app.use((req, res, next) => {
 
 app.use(express.json());
 
-// KONFIGURACJA - ZMIENNE ŚRODOWISKOWE
+// KONFIGURACJA
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
-if (!DISCORD_BOT_TOKEN) {
-    console.error('❌ Brak DISCORD_BOT_TOKEN');
+if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID) {
+    console.error('❌ Brak zmiennych środowiskowych!');
     process.exit(1);
 }
 
-if (!DISCORD_CHANNEL_ID) {
-    console.error('❌ Brak DISCORD_CHANNEL_ID');
-    process.exit(1);
-}
+// STAN APLIKACJI (w pamięci serwera - działa dla wszystkich)
+let serverState = {
+    accessCode: 'WbC84nGF',  // Domyślny kod
+    codeVersion: 0,
+    activeMessageId: null,
+    activeCodeType: null,
+    lastChanged: Date.now(),
+    changedBy: 'system'
+};
 
-// ZMIENNE GLOBALNE - przechowują ID aktywnej wiadomości
-let activeMessageId = null;
-let activeCodeType = null;
+// ============================================================
+// ENDPOINTY DLA KODU DOSTĘPOWEGO (REALTIME SYNC)
+// ============================================================
 
-// ROUTES
-app.get('/', (req, res) => {
-    res.json({ 
-        status: 'OK', 
-        activeMessageId: activeMessageId,
-        activeCodeType: activeCodeType
+// Pobierz aktualny kod
+app.get('/api/code', (req, res) => {
+    res.json({
+        accessCode: serverState.accessCode,
+        version: serverState.codeVersion,
+        lastChanged: serverState.lastChanged,
+        changedBy: serverState.changedBy
     });
 });
 
-// GŁÓWNY ENDPOINT - wysyła NOWĄ lub EDYTUJE istniejącą
+// Zmień kod (tylko admin)
+app.post('/api/code', (req, res) => {
+    const { newCode, adminCode, changedBy } = req.body;
+    
+    // Weryfikacja kodu admina (taki sam jak w frontendzie)
+    const ADMIN_CODE = 'OuO#()De@!VE';
+    
+    if (adminCode !== ADMIN_CODE) {
+        return res.status(403).json({ success: false, error: 'Nieprawidłowy kod admina' });
+    }
+    
+    if (!newCode || newCode.length < 4) {
+        return res.status(400).json({ success: false, error: 'Kod musi mieć min. 4 znaki' });
+    }
+    
+    serverState.accessCode = newCode.toUpperCase();
+    serverState.codeVersion++;
+    serverState.lastChanged = Date.now();
+    serverState.changedBy = changedBy || 'admin';
+    
+    console.log('[API] Zmieniono kod na:', serverState.accessCode, 'v' + serverState.codeVersion);
+    
+    res.json({
+        success: true,
+        accessCode: serverState.accessCode,
+        version: serverState.codeVersion
+    });
+});
+
+// ============================================================
+// ENDPOINTY DLA KODÓW ZAGROŻENIA (REALTIME SYNC)
+// ============================================================
+
+// Pobierz aktualny kod zagrożenia
+app.get('/api/threat', (req, res) => {
+    res.json({
+        codeType: serverState.activeCodeType,
+        messageId: serverState.activeMessageId,
+        since: serverState.lastChanged
+    });
+});
+
+// ============================================================
+// DISCORD - KODY ZAGROŻENIA
+// ============================================================
+
 app.post('/send-threat', async (req, res) => {
     console.log('[POST] Otrzymano:', req.body);
     
     const { codeType, officer } = req.body;
     
     const codes = {
-        green: { 
-            name: 'KOD ZIELONY', 
-            color: 0x22c55e, 
-            emoji: '🟢',
-            desc: 'Sytuacja stabilna w mieście, standardowy pościg bez podwyższonego ryzyka lub brak zagrożenia terrorystycznego w mieście.' 
-        },
-        orange: { 
-            name: 'KOD POMARAŃCZOWY', 
-            color: 0xf97316, 
-            emoji: '🟠',
-            desc: 'Zwiększone ryzyko w mieście. Podczas pościgu oznacza autoryzację do wykonywania manewrów PIT (spychani, taranowanie) poza miastem. Może oznaczać zwiększenie liczebności rabunków bądź większego zagrożenia.' 
-        },
-        red: { 
-            name: 'KOD CZERWONY', 
-            color: 0xef4444, 
-            emoji: '🔴',
-            desc: 'Wysokie zagrożenie. Autoryzacja do zniszczenia opon pojazdu (strzały w opony). W mieście oznacza zwiększone zagrożenie terrorystyczne (np: Porwanie Policjanta).' 
-        },
-        black: { 
-            name: 'KOD CZARNY', 
-            color: 0x1f2937, 
-            emoji: '⚫',
-            desc: 'Ekstremalne zagrożenie. Autoryzacja na użycie broni palnej w kierunku napastników. W mieście oznacza duże prawdopodobieństwo lub trwający atak terrorystyczny (np: Porwanie wielu obywateli bądź osób publicznych).' 
-        }
+        green: { name: 'KOD ZIELONY', color: 0x22c55e, emoji: '🟢', desc: 'Sytuacja stabilna w mieście, standardowy pościg bez podwyższonego ryzyka lub brak zagrożenia terrorystycznego w mieście.' },
+        orange: { name: 'KOD POMARAŃCZOWY', color: 0xf97316, emoji: '🟠', desc: 'Zwiększone ryzyko w mieście. Podczas pościgu oznacza autoryzację do wykonywania manewrów PIT (spychani, taranowanie) poza miastem. Może oznaczać zwiększenie liczebności rabunków bądź większego zagrożenia.' },
+        red: { name: 'KOD CZERWONY', color: 0xef4444, emoji: '🔴', desc: 'Wysokie zagrożenie. Autoryzacja do zniszczenia opon pojazdu (strzały w opony). W mieście oznacza zwiększone zagrożenie terrorystyczne (np: Porwanie Policjanta).' },
+        black: { name: 'KOD CZARNY', color: 0x1f2937, emoji: '⚫', desc: 'Ekstremalne zagrożenie. Autoryzacja na użycie broni palnej w kierunku napastników. W mieście oznacza duże prawdopodobieństwo lub trwający atak terrorystyczny (np: Porwanie wielu obywateli bądź osób publicznych).' }
     };
     
     const code = codes[codeType];
-    
-    if (!code) {
-        return res.status(400).json({ 
-            success: false, 
-            error: 'Nieprawidłowy kod: ' + codeType 
-        });
-    }
+    if (!code) return res.status(400).json({ success: false, error: 'Zły kod' });
     
     try {
         const embed = {
@@ -91,154 +116,90 @@ app.post('/send-threat', async (req, res) => {
             description: code.desc,
             color: code.color,
             fields: [
-                { 
-                    name: 'Autor zmiany', 
-                    value: officer || 'Nieznany', 
-                    inline: true 
-                },
-                { 
-                    name: 'Czas', 
-                    value: new Date().toLocaleString('pl-PL'), 
-                    inline: true 
-                }
+                { name: 'Autor zmiany', value: officer || 'Nieznany', inline: true },
+                { name: 'Czas', value: new Date().toLocaleString('pl-PL'), inline: true }
             ],
-            footer: {
-                text: 'System Kodów Zagrożenia - LASD'
-            },
+            footer: { text: 'System Kodów Zagrożenia - LASD' },
             timestamp: new Date().toISOString()
         };
         
-        if (codeType === 'red') {
-            embed.fields.push({
-                name: '⚠️ Dopisek',
-                value: 'Jednostki Policji Mogą Posiadać Broń Maszynową Krótką (np: MP7).',
-                inline: false
-            });
-        }
+        if (codeType === 'red') embed.fields.push({ name: '⚠️ Dopisek', value: 'Jednostki Policji Mogą Posiadać Broń Maszynową Krótką (np: MP7).', inline: false });
+        if (codeType === 'black') embed.fields.push({ name: '⚠️ Dopisek', value: 'Jednostki Policji Mają autoryzację strzelać z broni palnej do napastników gdy jest zagrożenie życia.', inline: false });
         
-        if (codeType === 'black') {
-            embed.fields.push({
-                name: '⚠️ Dopisek',
-                value: 'Jednostki Policji Mają autoryzację strzelać z broni palnej do napastników gdy jest zagrożenie życia.',
-                inline: false
-            });
-        }
-        
-        let response;
         let isEdit = false;
+        let response;
         
-        // Jeśli mamy aktywną wiadomość - EDYTUJEMY ją (PATCH)
-        if (activeMessageId) {
-            console.log('[POST] Edytuję istniejącą:', activeMessageId);
-            
-            const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${activeMessageId}`;
-            
-            response = await fetch(url, {
+        // Jeśli mamy aktywną wiadomość - EDYTUJEMY
+        if (serverState.activeMessageId) {
+            console.log('[POST] Edytuję:', serverState.activeMessageId);
+            response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
                 method: 'PATCH',
-                headers: {
-                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ embeds: [embed] })
             });
-            
             isEdit = true;
-            
         } else {
-            // Brak aktywnej - WYSYŁAMY nową (POST)
-            console.log('[POST] Wysyłam nową wiadomość');
-            
-            const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`;
-            
-            response = await fetch(url, {
+            // Nowa wiadomość
+            console.log('[POST] Wysyłam nową');
+            response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
                 method: 'POST',
-                headers: {
-                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ embeds: [embed] })
             });
         }
         
         if (!response.ok) {
-            const errorText = await response.text();
-            console.error('[POST] Błąd:', response.status, errorText);
+            const err = await response.text();
+            console.error('[POST] Błąd:', response.status, err);
             
             // Jeśli edycja nieudana (404), wyślij nową
             if (isEdit && response.status === 404) {
                 console.log('[POST] Edycja nieudana, nowa...');
-                activeMessageId = null;
-                
-                const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`;
-                
-                response = await fetch(url, {
+                serverState.activeMessageId = null;
+                response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
                     method: 'POST',
-                    headers: {
-                        'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
                     body: JSON.stringify({ embeds: [embed] })
                 });
-                
+                if (!response.ok) return res.status(500).json({ success: false, error: 'Błąd Discord' });
                 isEdit = false;
-                
-                if (!response.ok) {
-                    const err = await response.text();
-                    return res.status(500).json({ success: false, error: err });
-                }
             } else {
-                return res.status(response.status).json({ 
-                    success: false, 
-                    error: errorText 
-                });
+                return res.status(response.status).json({ success: false, error: err });
             }
         }
         
         const data = await response.json();
         
-        activeMessageId = data.id;
-        activeCodeType = codeType;
+        // ZAPISZ STAN NA SERWERZE (dla wszystkich użytkowników)
+        serverState.activeMessageId = data.id;
+        serverState.activeCodeType = codeType;
+        serverState.lastChanged = Date.now();
         
-        console.log('[POST] Sukces! ID:', data.id, 'Edycja:', isEdit);
-        
-        res.json({ 
-            success: true,
-            messageId: data.id,
-            isEdit: isEdit,
-            codeType: codeType
-        });
+        console.log('[POST] Sukces! ID:', data.id, 'Typ:', codeType, 'Edycja:', isEdit);
+        res.json({ success: true, messageId: data.id, isEdit: isEdit, codeType: codeType });
         
     } catch (e) {
         console.error('[POST] Wyjątek:', e);
-        res.status(500).json({ 
-            success: false, 
-            error: e.message 
-        });
+        res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// Usuń aktywną wiadomość (reset)
+// Usuń aktywny kod zagrożenia
 app.delete('/delete-active', async (req, res) => {
-    if (!activeMessageId) {
-        return res.json({ success: true, message: 'Brak aktywnej' });
+    if (!serverState.activeMessageId) {
+        return res.json({ success: true, message: 'Brak aktywnego kodu' });
     }
     
     try {
-        const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${activeMessageId}`;
-        
-        const response = await fetch(url, {
+        const response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
             method: 'DELETE',
-            headers: { 
-                'Authorization': `Bot ${DISCORD_BOT_TOKEN}`,
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' }
         });
         
-        activeMessageId = null;
-        activeCodeType = null;
+        serverState.activeMessageId = null;
+        serverState.activeCodeType = null;
         
         res.json({ success: true, status: response.status });
-        
     } catch (e) {
         res.status(500).json({ success: false, error: e.message });
     }
@@ -246,12 +207,11 @@ app.delete('/delete-active', async (req, res) => {
 
 // START
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, () => {
     console.log('========================================');
-    console.log('✅ Bot działa na porcie ' + PORT);
-    console.log('📺 Kanał Discord ID:', DISCORD_CHANNEL_ID);
-    console.log('🔑 Token ustawiony:', DISCORD_BOT_TOKEN ? 'TAK' : 'NIE');
+    console.log('✅ Serwer działa na porcie ' + PORT);
+    console.log('📺 Kanał Discord:', DISCORD_CHANNEL_ID);
+    console.log('🔑 Kod dostępu:', serverState.accessCode);
     console.log('🌐 CORS: WŁĄCZONY');
     console.log('========================================');
 });
