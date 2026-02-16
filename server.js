@@ -1,27 +1,39 @@
 const express = require('express');
 const app = express();
+
+// ============================================
+// CORS - WAŻNE! Pozwól na zapytania z przeglądarki
+// ============================================
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    
+    // Obsługa preflight (OPTIONS)
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    
+    next();
+});
+
 app.use(express.json());
 
 // ============================================
 // KONFIGURACJA - ZMIENNE ŚRODOWISKOWE
 // ============================================
-// Ustaw te zmienne w panelu Render (Environment Variables):
-// DISCORD_BOT_TOKEN = twój_token_bota
-// DISCORD_CHANNEL_ID = id_kanału_discord
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
 // Sprawdź czy zmienne są ustawione
 if (!DISCORD_BOT_TOKEN) {
-    console.error('❌ BŁĄD: Brak zmiennej środowiskowej DISCORD_BOT_TOKEN');
-    console.error('Ustaw ją w panelu Render lub w pliku .env');
+    console.error('❌ BŁĄD: Brak zmiennej DISCORD_BOT_TOKEN');
     process.exit(1);
 }
 
 if (!DISCORD_CHANNEL_ID) {
-    console.error('❌ BŁĄD: Brak zmiennej środowiskowej DISCORD_CHANNEL_ID');
-    console.error('Ustaw ją w panelu Render lub w pliku .env');
+    console.error('❌ BŁĄD: Brak zmiennej DISCORD_CHANNEL_ID');
     process.exit(1);
 }
 
@@ -30,11 +42,26 @@ if (!DISCORD_CHANNEL_ID) {
 // ============================================
 
 app.get('/', (req, res) => {
-    res.send('Bot działa poprawnie');
+    res.json({ 
+        status: 'OK', 
+        message: 'Bot działa',
+        timestamp: new Date().toISOString()
+    });
 });
 
-// Wysyłanie kodu zagrożenia do Discord
+// Test CORS
+app.get('/test', (req, res) => {
+    res.json({ 
+        success: true,
+        message: 'CORS działa poprawnie!',
+        cors: 'enabled'
+    });
+});
+
+// Wysyłanie kodu zagrożenia
 app.post('/send-threat', async (req, res) => {
+    console.log('[POST /send-threat] Otrzymano żądanie:', req.body);
+    
     const { codeType, officer } = req.body;
     
     const codes = {
@@ -63,14 +90,14 @@ app.post('/send-threat', async (req, res) => {
     const code = codes[codeType];
     
     if (!code) {
+        console.log('[POST /send-threat] Nieprawidłowy kod:', codeType);
         return res.status(400).json({ 
             success: false, 
-            error: 'Nieprawidłowy kod' 
+            error: 'Nieprawidłowy kod: ' + codeType 
         });
     }
     
     try {
-        // Przygotuj embed
         const embed = {
             title: `🚨 ${code.name}`,
             description: code.desc,
@@ -93,7 +120,6 @@ app.post('/send-threat', async (req, res) => {
             timestamp: new Date().toISOString()
         };
         
-        // Dodaj dopisek dla kodów czerwonego i czarnego
         if (codeType === 'red') {
             embed.fields.push({
                 name: '⚠️ Dopisek',
@@ -110,10 +136,9 @@ app.post('/send-threat', async (req, res) => {
             });
         }
         
-        // Wyślij do Discord
         const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`;
         
-        console.log('[SEND] Wysyłam wiadomość...');
+        console.log('[POST /send-threat] Wysyłam do Discord...');
         
         const response = await fetch(url, {
             method: 'POST',
@@ -126,15 +151,15 @@ app.post('/send-threat', async (req, res) => {
         
         if (!response.ok) {
             const errorText = await response.text();
-            console.error('[SEND] Błąd Discord API:', response.status, errorText);
+            console.error('[POST /send-threat] Błąd Discord:', response.status, errorText);
             return res.status(response.status).json({ 
                 success: false, 
-                error: 'Błąd Discord: ' + errorText 
+                error: 'Discord API: ' + errorText 
             });
         }
         
         const data = await response.json();
-        console.log('[SEND] Wysłano, ID:', data.id);
+        console.log('[POST /send-threat] Wysłano, ID:', data.id);
         
         res.json({ 
             success: true,
@@ -142,7 +167,7 @@ app.post('/send-threat', async (req, res) => {
         });
         
     } catch (e) {
-        console.error('[SEND] Błąd:', e);
+        console.error('[POST /send-threat] Wyjątek:', e);
         res.status(500).json({ 
             success: false, 
             error: e.message 
@@ -150,23 +175,24 @@ app.post('/send-threat', async (req, res) => {
     }
 });
 
-// Usuwanie wiadomości z Discord
+// Usuwanie wiadomości
 app.delete('/delete-message/:id', async (req, res) => {
     const messageId = req.params.id;
     
-    console.log('[DELETE] Prośba o usunięcie wiadomości ID:', messageId);
+    console.log('[DELETE /delete-message] ID:', messageId);
     
-    if (!messageId) {
+    if (!messageId || messageId === 'null' || messageId === 'undefined') {
+        console.log('[DELETE /delete-message] Brak ID lub nieprawidłowe');
         return res.status(400).json({ 
             success: false, 
-            error: 'Brak ID wiadomości' 
+            error: 'Brak lub nieprawidłowe ID wiadomości' 
         });
     }
     
     try {
         const url = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${messageId}`;
         
-        console.log('[DELETE] URL:', url);
+        console.log('[DELETE /delete-message] Usuwam...');
         
         const response = await fetch(url, {
             method: 'DELETE',
@@ -176,11 +202,9 @@ app.delete('/delete-message/:id', async (req, res) => {
             }
         });
         
-        console.log('[DELETE] Odpowiedź Discord API:', response.status);
+        console.log('[DELETE /delete-message] Status:', response.status);
         
-        // 204 = sukces (no content), 404 = już usunięta (też OK)
         if (response.status === 204) {
-            console.log('[DELETE] Usunięto pomyślnie');
             return res.json({ 
                 success: true, 
                 status: 204,
@@ -189,24 +213,21 @@ app.delete('/delete-message/:id', async (req, res) => {
         }
         
         if (response.status === 404) {
-            console.log('[DELETE] Nie znaleziono (już usunięta?)');
             return res.json({ 
                 success: true, 
                 status: 404,
-                message: 'Nie znaleziono (już usunięta?)'
+                message: 'Już usunięta lub nie istnieje'
             });
         }
         
-        // Inny błąd
         const errorText = await response.text();
-        console.error('[DELETE] Błąd:', response.status, errorText);
         res.status(response.status).json({ 
             success: false, 
             error: errorText 
         });
         
     } catch (e) {
-        console.error('[DELETE] Wyjątek:', e);
+        console.error('[DELETE /delete-message] Wyjątek:', e);
         res.status(500).json({ 
             success: false, 
             error: e.message 
@@ -215,7 +236,7 @@ app.delete('/delete-message/:id', async (req, res) => {
 });
 
 // ============================================
-// START SERWERA
+// START
 // ============================================
 
 const PORT = process.env.PORT || 3000;
@@ -225,5 +246,6 @@ app.listen(PORT, () => {
     console.log('✅ Bot działa na porcie ' + PORT);
     console.log('📺 Kanał Discord ID:', DISCORD_CHANNEL_ID);
     console.log('🔑 Token ustawiony:', DISCORD_BOT_TOKEN ? 'TAK' : 'NIE');
+    console.log('🌐 CORS: WŁĄCZONY');
     console.log('========================================');
 });
