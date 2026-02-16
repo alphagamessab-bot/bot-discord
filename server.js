@@ -1,7 +1,7 @@
 const express = require('express');
 const app = express();
 
-// CORS
+// CORS - MUSI być na początku!
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
@@ -25,12 +25,12 @@ if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID) {
     process.exit(1);
 }
 
-// STAN APLIKACJI (w pamięci serwera - działa dla wszystkich)
+// STAN APLIKACJI (w pamięci serwera - działa dla wszystkich użytkowników!)
 let serverState = {
-    accessCode: 'WbC84nGF',  // Domyślny kod
+    accessCode: 'WbC84nGF',
     codeVersion: 0,
     activeMessageId: null,
-    activeCodeType: null,
+    activeCodeType: null,  // 'green', 'orange', 'red', 'black' lub null
     lastChanged: Date.now(),
     changedBy: 'system'
 };
@@ -39,7 +39,6 @@ let serverState = {
 // ENDPOINTY DLA KODU DOSTĘPOWEGO (REALTIME SYNC)
 // ============================================================
 
-// Pobierz aktualny kod
 app.get('/api/code', (req, res) => {
     res.json({
         accessCode: serverState.accessCode,
@@ -49,11 +48,8 @@ app.get('/api/code', (req, res) => {
     });
 });
 
-// Zmień kod (tylko admin)
 app.post('/api/code', (req, res) => {
     const { newCode, adminCode, changedBy } = req.body;
-    
-    // Weryfikacja kodu admina (taki sam jak w frontendzie)
     const ADMIN_CODE = 'OuO#()De@!VE';
     
     if (adminCode !== ADMIN_CODE) {
@@ -69,7 +65,7 @@ app.post('/api/code', (req, res) => {
     serverState.lastChanged = Date.now();
     serverState.changedBy = changedBy || 'admin';
     
-    console.log('[API] Zmieniono kod na:', serverState.accessCode, 'v' + serverState.codeVersion);
+    console.log('[API] Zmieniono kod na:', serverState.accessCode);
     
     res.json({
         success: true,
@@ -79,21 +75,29 @@ app.post('/api/code', (req, res) => {
 });
 
 // ============================================================
-// ENDPOINTY DLA KODÓW ZAGROŻENIA (REALTIME SYNC)
+// ENDPOINTY DLA KODÓW ZAGROŻENIA (REALTIME SYNC - NOWE!)
 // ============================================================
 
-// Pobierz aktualny kod zagrożenia
+// Pobierz aktualny kod zagrożenia (dla wszystkich użytkowników)
 app.get('/api/threat', (req, res) => {
     res.json({
         codeType: serverState.activeCodeType,
         messageId: serverState.activeMessageId,
-        since: serverState.lastChanged
+        since: serverState.lastChanged,
+        changedBy: serverState.changedBy
     });
 });
 
 // ============================================================
 // DISCORD - KODY ZAGROŻENIA
 // ============================================================
+
+// Funkcja pomocnicza do fetch (Node.js 16/18 compatibility)
+async function discordFetch(url, options) {
+    // Użyj globalThis.fetch jeśli dostępny (Node 18+), inaczej require('node-fetch')
+    const fetch = globalThis.fetch || require('node-fetch');
+    return fetch(url, options);
+}
 
 app.post('/send-threat', async (req, res) => {
     console.log('[POST] Otrzymano:', req.body);
@@ -129,21 +133,26 @@ app.post('/send-threat', async (req, res) => {
         let isEdit = false;
         let response;
         
-        // Jeśli mamy aktywną wiadomość - EDYTUJEMY
+        // POPRAWKA: Usunięto spacje w URL!
         if (serverState.activeMessageId) {
             console.log('[POST] Edytuję:', serverState.activeMessageId);
-            response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
+            response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
                 method: 'PATCH',
-                headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+                headers: { 
+                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
+                    'Content-Type': 'application/json' 
+                },
                 body: JSON.stringify({ embeds: [embed] })
             });
             isEdit = true;
         } else {
-            // Nowa wiadomość
             console.log('[POST] Wysyłam nową');
-            response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+            response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
                 method: 'POST',
-                headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+                headers: { 
+                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
+                    'Content-Type': 'application/json' 
+                },
                 body: JSON.stringify({ embeds: [embed] })
             });
         }
@@ -156,9 +165,12 @@ app.post('/send-threat', async (req, res) => {
             if (isEdit && response.status === 404) {
                 console.log('[POST] Edycja nieudana, nowa...');
                 serverState.activeMessageId = null;
-                response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+                response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
                     method: 'POST',
-                    headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+                    headers: { 
+                        'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
+                        'Content-Type': 'application/json' 
+                    },
                     body: JSON.stringify({ embeds: [embed] })
                 });
                 if (!response.ok) return res.status(500).json({ success: false, error: 'Błąd Discord' });
@@ -170,13 +182,20 @@ app.post('/send-threat', async (req, res) => {
         
         const data = await response.json();
         
-        // ZAPISZ STAN NA SERWERZE (dla wszystkich użytkowników)
+        // ZAPISZ STAN NA SERWERZE (dla wszystkich użytkowników!)
         serverState.activeMessageId = data.id;
         serverState.activeCodeType = codeType;
         serverState.lastChanged = Date.now();
+        serverState.changedBy = officer || 'system';
         
         console.log('[POST] Sukces! ID:', data.id, 'Typ:', codeType, 'Edycja:', isEdit);
-        res.json({ success: true, messageId: data.id, isEdit: isEdit, codeType: codeType });
+        res.json({ 
+            success: true, 
+            messageId: data.id, 
+            isEdit: isEdit, 
+            codeType: codeType,
+            timestamp: serverState.lastChanged
+        });
         
     } catch (e) {
         console.error('[POST] Wyjątek:', e);
@@ -191,13 +210,18 @@ app.delete('/delete-active', async (req, res) => {
     }
     
     try {
+        const fetch = globalThis.fetch || require('node-fetch');
         const response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
             method: 'DELETE',
-            headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' }
+            headers: { 
+                'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
+                'Content-Type': 'application/json' 
+            }
         });
         
         serverState.activeMessageId = null;
         serverState.activeCodeType = null;
+        serverState.lastChanged = Date.now();
         
         res.json({ success: true, status: response.status });
     } catch (e) {
