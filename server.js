@@ -2,8 +2,19 @@ const express = require('express');
 const app = express();
 app.use(express.json());
 
-const DISCORD_BOT_TOKEN = 'TU_WKLEJ_TOKEN';
-const DISCORD_CHANNEL_ID = 'TU_WKLEJ_ID_KANALU';
+// CORS - pozwala na połączenia z przeglądarki
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
 app.get('/', (req, res) => {
     res.send('Bot dziala');
