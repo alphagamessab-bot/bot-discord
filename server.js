@@ -1,16 +1,14 @@
 const express = require('express');
+const fs = require('fs').promises;
+const path = require('path');
 const app = express();
 
-// CORS - MUSI być na początku!
+// CORS
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
-    
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
-    }
-    
+    if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
 
@@ -25,18 +23,50 @@ if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID) {
     process.exit(1);
 }
 
-// STAN APLIKACJI (w pamięci serwera - działa dla wszystkich użytkowników!)
-let serverState = {
-    accessCode: 'WbC84nGF',
+// PLIK DO PRZECHOWYWANIA STANU
+const STATE_FILE = path.join(__dirname, 'server-state.json');
+
+// Domyślny stan (TYLKO PRZY PIERWSZYM URUCHOMIENIU)
+const DEFAULT_STATE = {
+    accessCode: 'CHILLRP',  // ZMIENIONY DOMYŚLNY KOD
     codeVersion: 0,
     activeMessageId: null,
-    activeCodeType: null,  // 'green', 'orange', 'red', 'black' lub null
+    activeCodeType: null,
     lastChanged: Date.now(),
     changedBy: 'system'
 };
 
+// Wczytaj stan z pliku lub utwórz domyślny
+async function loadState() {
+    try {
+        const data = await fs.readFile(STATE_FILE, 'utf8');
+        const state = JSON.parse(data);
+        console.log('✅ Stan wczytany z pliku:', state.accessCode);
+        return state;
+    } catch (e) {
+        console.log('📝 Tworzę nowy plik stanu z kodem:', DEFAULT_STATE.accessCode);
+        await saveState(DEFAULT_STATE);
+        return DEFAULT_STATE;
+    }
+}
+
+// Zapisz stan do pliku
+async function saveState(state) {
+    try {
+        await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (e) {
+        console.error('❌ Błąd zapisu stanu:', e);
+    }
+}
+
+// Globalny stan (wczytywany przy starcie)
+let serverState = DEFAULT_STATE;
+
+// Inicjalizacja przy starcie
+loadState().then(state => { serverState = state; });
+
 // ============================================================
-// ENDPOINTY DLA KODU DOSTĘPOWEGO (REALTIME SYNC)
+// ENDPOINTY DLA KODU DOSTĘPOWEGO
 // ============================================================
 
 app.get('/api/code', (req, res) => {
@@ -48,7 +78,7 @@ app.get('/api/code', (req, res) => {
     });
 });
 
-app.post('/api/code', (req, res) => {
+app.post('/api/code', async (req, res) => {
     const { newCode, adminCode, changedBy } = req.body;
     const ADMIN_CODE = 'OuO#()De@!VE';
     
@@ -60,12 +90,16 @@ app.post('/api/code', (req, res) => {
         return res.status(400).json({ success: false, error: 'Kod musi mieć min. 4 znaki' });
     }
     
+    // Aktualizuj stan
     serverState.accessCode = newCode.toUpperCase();
     serverState.codeVersion++;
     serverState.lastChanged = Date.now();
     serverState.changedBy = changedBy || 'admin';
     
-    console.log('[API] Zmieniono kod na:', serverState.accessCode);
+    // ZAPISZ DO PLIKU!
+    await saveState(serverState);
+    
+    console.log('[API] Zmieniono kod na:', serverState.accessCode, 'v' + serverState.codeVersion);
     
     res.json({
         success: true,
@@ -75,10 +109,9 @@ app.post('/api/code', (req, res) => {
 });
 
 // ============================================================
-// ENDPOINTY DLA KODÓW ZAGROŻENIA (REALTIME SYNC - NOWE!)
+// ENDPOINTY DLA KODÓW ZAGROŻENIA
 // ============================================================
 
-// Pobierz aktualny kod zagrożenia (dla wszystkich użytkowników)
 app.get('/api/threat', (req, res) => {
     res.json({
         codeType: serverState.activeCodeType,
@@ -92,9 +125,7 @@ app.get('/api/threat', (req, res) => {
 // DISCORD - KODY ZAGROŻENIA
 // ============================================================
 
-// Funkcja pomocnicza do fetch (Node.js 16/18 compatibility)
 async function discordFetch(url, options) {
-    // Użyj globalThis.fetch jeśli dostępny (Node 18+), inaczej require('node-fetch')
     const fetch = globalThis.fetch || require('node-fetch');
     return fetch(url, options);
 }
@@ -133,60 +164,52 @@ app.post('/send-threat', async (req, res) => {
         let isEdit = false;
         let response;
         
-        // POPRAWKA: Usunięto spacje w URL!
+        // Sprawdź czy mamy zapisaną wiadomość i czy nadal istnieje
         if (serverState.activeMessageId) {
-            console.log('[POST] Edytuję:', serverState.activeMessageId);
+            console.log('[POST] Próba edycji:', serverState.activeMessageId);
             response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
                 method: 'PATCH',
-                headers: { 
-                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
-                    'Content-Type': 'application/json' 
-                },
+                headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ embeds: [embed] })
             });
-            isEdit = true;
+            
+            // Jeśli 404 (wiadomość usunięta), wyślij nową
+            if (response.status === 404) {
+                console.log('[POST] Stara wiadomość nie istnieje, wysyłam nową');
+                serverState.activeMessageId = null;
+                response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ embeds: [embed] })
+                });
+                isEdit = false;
+            } else {
+                isEdit = true;
+            }
         } else {
-            console.log('[POST] Wysyłam nową');
+            // Nowa wiadomość
+            console.log('[POST] Wysyłam nową wiadomość');
             response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
                 method: 'POST',
-                headers: { 
-                    'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
-                    'Content-Type': 'application/json' 
-                },
+                headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ embeds: [embed] })
             });
         }
         
         if (!response.ok) {
             const err = await response.text();
-            console.error('[POST] Błąd:', response.status, err);
-            
-            // Jeśli edycja nieudana (404), wyślij nową
-            if (isEdit && response.status === 404) {
-                console.log('[POST] Edycja nieudana, nowa...');
-                serverState.activeMessageId = null;
-                response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
-                    method: 'POST',
-                    headers: { 
-                        'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
-                        'Content-Type': 'application/json' 
-                    },
-                    body: JSON.stringify({ embeds: [embed] })
-                });
-                if (!response.ok) return res.status(500).json({ success: false, error: 'Błąd Discord' });
-                isEdit = false;
-            } else {
-                return res.status(response.status).json({ success: false, error: err });
-            }
+            console.error('[POST] Błąd Discord:', response.status, err);
+            return res.status(response.status).json({ success: false, error: err });
         }
         
         const data = await response.json();
         
-        // ZAPISZ STAN NA SERWERZE (dla wszystkich użytkowników!)
+        // ZAPISZ STAN DO PLIKU!
         serverState.activeMessageId = data.id;
         serverState.activeCodeType = codeType;
         serverState.lastChanged = Date.now();
         serverState.changedBy = officer || 'system';
+        await saveState(serverState);
         
         console.log('[POST] Sukces! ID:', data.id, 'Typ:', codeType, 'Edycja:', isEdit);
         res.json({ 
@@ -213,15 +236,13 @@ app.delete('/delete-active', async (req, res) => {
         const fetch = globalThis.fetch || require('node-fetch');
         const response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${serverState.activeMessageId}`, {
             method: 'DELETE',
-            headers: { 
-                'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
-                'Content-Type': 'application/json' 
-            }
+            headers: { 'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 'Content-Type': 'application/json' }
         });
         
         serverState.activeMessageId = null;
         serverState.activeCodeType = null;
         serverState.lastChanged = Date.now();
+        await saveState(serverState);
         
         res.json({ success: true, status: response.status });
     } catch (e) {
@@ -236,6 +257,6 @@ app.listen(PORT, () => {
     console.log('✅ Serwer działa na porcie ' + PORT);
     console.log('📺 Kanał Discord:', DISCORD_CHANNEL_ID);
     console.log('🔑 Kod dostępu:', serverState.accessCode);
-    console.log('🌐 CORS: WŁĄCZONY');
+    console.log('💾 Zapis stanu: PLIK (trwały)');
     console.log('========================================');
 });
