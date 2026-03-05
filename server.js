@@ -20,6 +20,9 @@ app.use(express.json());
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
+// WYMAGANE dla połączenia z botem Python
+const BOT_API_KEY = process.env.BOT_API_KEY || 'tajny-klucz-dla-bota';
+
 if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID) {
     console.error('❌ Brak zmiennych środowiskowych!');
     process.exit(1);
@@ -40,7 +43,6 @@ db.serialize(() => {
         changedBy TEXT DEFAULT 'system'
     )`);
     
-    // Wstaw domyślne wartości jeśli tabela pusta
     db.get("SELECT COUNT(*) as count FROM server_state", (err, row) => {
         if (err) {
             console.error('Błąd sprawdzania tabeli:', err);
@@ -53,8 +55,11 @@ db.serialize(() => {
                 else console.log('📝 Utworzono domyślny stan z kodem: CHILLRP');
             });
         } else {
-            db.get("SELECT accessCode FROM server_state WHERE id = 1", (err, row) => {
-                if (!err && row) console.log('✅ Wczytano kod:', row.accessCode);
+            db.get("SELECT accessCode, activeCodeType FROM server_state WHERE id = 1", (err, row) => {
+                if (!err && row) {
+                    console.log('✅ Wczytano kod dostępu:', row.accessCode);
+                    console.log('✅ Aktywny kod zagrożenia:', row.activeCodeType || 'brak');
+                }
             });
         }
     });
@@ -92,8 +97,17 @@ function updateState(updates) {
     });
 }
 
+// Middleware autoryzacji dla bota
+function botAuth(req, res, next) {
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey !== BOT_API_KEY) {
+        return res.status(403).json({ error: 'Brak autoryzacji' });
+    }
+    next();
+}
+
 // ============================================================
-// ENDPOINTY DLA KODU DOSTĘPOWEGO
+// ENDPOINTY PUBLICZNE (dla frontendu HTML)
 // ============================================================
 
 app.get('/api/code', async (req, res) => {
@@ -143,10 +157,7 @@ app.post('/api/code', async (req, res) => {
     }
 });
 
-// ============================================================
-// ENDPOINTY DLA KODÓW ZAGROŻENIA
-// ============================================================
-
+// Pobierz aktualny kod zagrożenia
 app.get('/api/threat', async (req, res) => {
     try {
         const state = await getState();
@@ -163,7 +174,58 @@ app.get('/api/threat', async (req, res) => {
 });
 
 // ============================================================
-// DISCORD - KODY ZAGROŻENIA
+// ENDPOINTY DLA BOTA DISCORD (Python) - wymagają API key
+// ============================================================
+
+// Bot pyta o aktualny kod zagrożenia
+app.get('/bot/threat', botAuth, async (req, res) => {
+    try {
+        const state = await getState();
+        res.json({
+            codeType: state.activeCodeType,
+            since: state.lastChanged,
+            changedBy: state.changedBy,
+            messageId: state.activeMessageId
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Bot wysyła/aktualizuje kod zagrożenia
+app.post('/bot/threat', botAuth, async (req, res) => {
+    const { codeType, officer, messageId } = req.body;
+    
+    try {
+        await updateState({
+            activeCodeType: codeType,
+            activeMessageId: messageId,
+            changedBy: officer || 'bot'
+        });
+        
+        console.log('[BOT API] Zapisano kod zagrożenia:', codeType, 'przez', officer);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Bot usuwa kod zagrożenia
+app.delete('/bot/threat', botAuth, async (req, res) => {
+    try {
+        await updateState({
+            activeCodeType: null,
+            activeMessageId: null,
+            changedBy: 'bot'
+        });
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ============================================================
+// DISCORD - KODY ZAGROŻENIA (z frontendu HTML)
 // ============================================================
 
 async function discordFetch(url, options) {
@@ -241,10 +303,12 @@ app.post('/send-threat', async (req, res) => {
         let response;
         let messageId = state.activeMessageId;
         
-        // Sprawdź czy mamy zapisaną wiadomość
+        // POPRAWIONY URL - bez spacji!
+        const baseUrl = `https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}`;
+        
         if (messageId) {
             console.log('[POST] Próba edycji wiadomości:', messageId);
-            response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${messageId}`, {
+            response = await discordFetch(`${baseUrl}/messages/${messageId}`, {
                 method: 'PATCH',
                 headers: { 
                     'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
@@ -253,10 +317,9 @@ app.post('/send-threat', async (req, res) => {
                 body: JSON.stringify({ embeds: [embed] })
             });
             
-            // Jeśli 404 - wiadomość usunięta, wyślij nową
             if (response.status === 404) {
                 console.log('[POST] Wiadomość nie istnieje, wysyłam nową');
-                response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+                response = await discordFetch(`${baseUrl}/messages`, {
                     method: 'POST',
                     headers: { 
                         'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
@@ -273,9 +336,8 @@ app.post('/send-threat', async (req, res) => {
                 isEdit = true;
             }
         } else {
-            // Nowa wiadomość
             console.log('[POST] Wysyłam nową wiadomość');
-            response = await discordFetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages`, {
+            response = await discordFetch(`${baseUrl}/messages`, {
                 method: 'POST',
                 headers: { 
                     'Authorization': `Bot ${DISCORD_BOT_TOKEN}`, 
@@ -324,6 +386,7 @@ app.delete('/delete-active', async (req, res) => {
         }
         
         const fetch = globalThis.fetch || require('node-fetch');
+        // POPRAWIONY URL
         const response = await fetch(`https://discord.com/api/v10/channels/${DISCORD_CHANNEL_ID}/messages/${state.activeMessageId}`, {
             method: 'DELETE',
             headers: { 
@@ -352,5 +415,6 @@ app.listen(PORT, () => {
     console.log('✅ Serwer działa na porcie ' + PORT);
     console.log('💾 Baza danych: SQLite (trwała)');
     console.log('🔑 Domyślny kod: CHILLRP');
+    console.log('🔐 Bot API Key:', BOT_API_KEY.substring(0, 10) + '...');
     console.log('========================================');
 });
