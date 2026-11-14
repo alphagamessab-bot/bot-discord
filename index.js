@@ -9,6 +9,7 @@ const {
   REST, 
   Routes, 
   ChannelType, 
+  ActivityType, 
   UserSelectMenuBuilder 
 } = require('discord.js');
 const Database = require('better-sqlite3');
@@ -263,6 +264,11 @@ client.on('interactionCreate', async (interaction) => {
 client.once('ready', async () => {
   console.log(`🤖 Zalogowano jako ${client.user.tag}`);
   dbLoadAll();
+
+  client.user.setPresence({
+    activities: [{ name: 'Vesper RP', type: ActivityType.Playing }],
+    status: 'online',
+  });
 
   try {
     const rest = new REST({ version: '10' }).setToken(TOKEN);
