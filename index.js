@@ -266,7 +266,7 @@ client.once('ready', async () => {
   dbLoadAll();
 
   client.user.setPresence({
-    activities: [{ name: 'Vesper RP', type: ActivityType.Playing }],
+    activities: [{ name: 'Gram tylko na Vesper RP', type: ActivityType.Playing }],
     status: 'online',
   });
 
